@@ -17,4 +17,9 @@ COPY --from=builder /app/server ./server
 COPY --from=builder /app/README.md ./README.md
 EXPOSE 3000
 ENV PORT=3000
+
+# For better experience in Baota / container panels
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3000/health || exit 1
+
 CMD ["node", "server/index.js"]
