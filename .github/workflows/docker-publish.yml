@@ -23,10 +23,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # GHCR requires lowercase repository names. GitHub usernames can contain uppercase,
+      # so we normalize the owner to lowercase for tags.
+      - name: Set owner lowercase
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Build and push
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/meting-api:latest,ghcr.io/${{ github.repository_owner }}/meting-api:${{ github.sha }}
+          tags: ghcr.io/${{ env.OWNER_LC }}/meting-api:latest,ghcr.io/${{ env.OWNER_LC }}/meting-api:${{ github.sha }}
           platforms: linux/amd64,linux/arm64
