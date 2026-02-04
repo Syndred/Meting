@@ -6,8 +6,6 @@ npm-debug.log
 Dockerfile
 docker-compose.yml
 test/
-src/
-providers/
 *.log
 .DS_Store
 coverage/
