@@ -15,10 +15,11 @@ function setCors(res) {
   );
 }
 
-function sendJsonString(res, jsonString) {
+function sendJsonString(res, payload) {
   res.statusCode = 200;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
-  res.end(jsonString);
+  const body = typeof payload === 'string' ? payload : JSON.stringify(payload);
+  res.end(body);
 }
 
 function sendError(res, statusCode, payload) {
@@ -48,12 +49,98 @@ function pick(obj, keys) {
  * - lyric (id required)
  * - pic (id required; size optional)
  */
-async function handleMeting(query) {
+async function asyncMapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let idx = 0;
+
+  async function worker() {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const current = idx++;
+      if (current >= items.length) return;
+      results[current] = await mapper(items[current], current);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+function truthy(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v ?? '').toLowerCase();
+  return s === '1' || s === 'true' || s === 'yes' || s === 'on';
+}
+
+function buildSelfUrl(baseUrl, server, type, id, extra = {}) {
+  const sp = new URLSearchParams({
+    server: String(server),
+    type: String(type),
+    id: String(id),
+    ...Object.fromEntries(
+      Object.entries(extra).filter(([, value]) => value !== undefined && value !== null)
+    ),
+  });
+  return `${baseUrl}/?${sp.toString()}`;
+}
+
+function extractUrlField(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') {
+    try {
+      const obj = JSON.parse(v);
+      return obj?.url ?? v;
+    } catch {
+      return v;
+    }
+  }
+  if (typeof v === 'object') {
+    return v.url ?? '';
+  }
+  return String(v);
+}
+
+async function enrichTracksToDirectLinks(tracks, meting, server, query, baseUrl) {
+  // Defaults tuned for player usage
+  const br = query.br !== undefined ? Number(query.br) : 320;
+  const size = query.size !== undefined ? Number(query.size) : 300;
+  const includeLrc = query.lrc === undefined ? true : truthy(query.lrc);
+
+  // concurrency: avoid hammering upstream
+  const concurrency = query.concurrency !== undefined ? Math.max(1, Number(query.concurrency)) : 6;
+
+  return await asyncMapLimit(tracks, concurrency, async (t) => {
+    const urlId = t.url_id ?? t.id ?? t.urlId;
+    const picId = t.pic_id ?? t.picId;
+    const lyricId = t.lyric_id ?? t.lyricId ?? t.id;
+
+    const urlRes = urlId ? await meting.url(urlId, br) : t.url;
+    const picRes = picId ? await meting.pic(picId, size) : t.pic;
+
+    const out = {
+      name: t.name,
+      artist: Array.isArray(t.artist) ? t.artist.join(' / ') : t.artist,
+      url: extractUrlField(urlRes),
+      pic: extractUrlField(picRes),
+      lrc: includeLrc && lyricId ? buildSelfUrl(baseUrl, server, 'lyric', lyricId) : undefined,
+    };
+
+    // keep some extra fields if present (useful for debugging)
+    if (t.id !== undefined) out.id = t.id;
+    if (t.album !== undefined) out.album = t.album;
+    return out;
+  });
+}
+
+async function handleMeting(query, baseUrl) {
   const server = query.server || 'netease';
   const type = (query.type || '').toString().toLowerCase();
 
   const meting = new Meting(server);
-  meting.format(query.format === 'true' || query.format === '1' || query.format === true);
+  const isFormat = truthy(query.format);
+  meting.format(isFormat);
 
   // Normalize some common aliases
   const t =
@@ -66,6 +153,8 @@ async function handleMeting(query) {
     throw new Error('Missing query param: type');
   }
 
+  let result;
+
   if (t === 'search') {
     const keyword = query.keyword ?? query.s;
     if (!keyword) throw new Error('Missing query param: keyword');
@@ -77,55 +166,68 @@ async function handleMeting(query) {
     if (option.page !== undefined) option.page = Number(option.page);
     if (option.limit !== undefined) option.limit = Number(option.limit);
 
-    return await meting.search(String(keyword), option);
-  }
-
-  if (t === 'song') {
+    result = await meting.search(String(keyword), option);
+  } else if (t === 'song') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
-    return await meting.song(id);
-  }
-
-  if (t === 'album') {
+    result = await meting.song(id);
+  } else if (t === 'album') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
-    return await meting.album(id);
-  }
-
-  if (t === 'artist') {
+    result = await meting.album(id);
+  } else if (t === 'artist') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
     const limit = query.limit !== undefined ? Number(query.limit) : undefined;
-    return await meting.artist(id, limit);
-  }
-
-  if (t === 'playlist') {
+    result = await meting.artist(id, limit);
+  } else if (t === 'playlist') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
-    return await meting.playlist(id);
-  }
-
-  if (t === 'url') {
+    result = await meting.playlist(id);
+  } else if (t === 'url') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
     const br = query.br !== undefined ? Number(query.br) : undefined;
-    return await meting.url(id, br);
-  }
-
-  if (t === 'lyric') {
+    result = await meting.url(id, br);
+  } else if (t === 'lyric') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
-    return await meting.lyric(id);
-  }
-
-  if (t === 'pic') {
+    result = await meting.lyric(id);
+  } else if (t === 'pic') {
     const id = query.id;
     if (!id) throw new Error('Missing query param: id');
     const size = query.size !== undefined ? Number(query.size) : undefined;
-    return await meting.pic(id, size);
+    result = await meting.pic(id, size);
+  } else {
+    throw new Error(`Unsupported type: ${t}`);
   }
 
-  throw new Error(`Unsupported type: ${t}`);
+  // If formatted list returns *_id fields, optionally resolve to direct links.
+  // Default: when format=true, resolve unless resolve=false
+  const shouldResolve = isFormat && (query.resolve === undefined ? true : truthy(query.resolve));
+  if (shouldResolve) {
+    let parsed = result;
+    let wasString = false;
+
+    if (typeof result === 'string') {
+      try {
+        parsed = JSON.parse(result);
+        wasString = true;
+      } catch {
+        // ignore: not JSON
+      }
+    }
+
+    if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
+      // If it already contains url/pic, keep as-is.
+      if (parsed[0].url === undefined && (parsed[0].url_id !== undefined || parsed[0].pic_id !== undefined)) {
+        const enriched = await enrichTracksToDirectLinks(parsed, meting, server, query, baseUrl);
+        result = wasString ? JSON.stringify(enriched) : enriched;
+      }
+    }
+  }
+
+  return result;
 }
 
 const server = http.createServer(async (req, res) => {
@@ -161,7 +263,14 @@ const server = http.createServer(async (req, res) => {
     }
 
     const query = Object.fromEntries(url.searchParams.entries());
-    const result = await handleMeting(query);
+
+    const forwardedProto = req.headers['x-forwarded-proto'];
+    const proto = forwardedProto ? String(forwardedProto).split(',')[0].trim() : 'http';
+    const forwardedHost = req.headers['x-forwarded-host'];
+    const host = forwardedHost ? String(forwardedHost).split(',')[0].trim() : (req.headers.host || 'localhost');
+    const baseUrl = `${proto}://${host}`;
+
+    const result = await handleMeting(query, baseUrl);
     sendJsonString(res, result);
   } catch (e) {
     sendError(res, 500, {
