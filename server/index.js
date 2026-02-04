@@ -220,7 +220,14 @@ async function handleMeting(query, baseUrl) {
 
     if (Array.isArray(parsed) && parsed.length && typeof parsed[0] === 'object') {
       // If it already contains url/pic, keep as-is.
-      if (parsed[0].url === undefined && (parsed[0].url_id !== undefined || parsed[0].pic_id !== undefined)) {
+      // Note: some providers return empty string "" for url/pic in formatted mode.
+      // Treat empty string as missing so we can resolve to direct links.
+      const first = parsed[0];
+      const urlMissing = first.url === undefined || first.url === null || first.url === '';
+      const picMissing = first.pic === undefined || first.pic === null || first.pic === '';
+      const hasResolvableId =
+        first.id !== undefined || first.url_id !== undefined || first.pic_id !== undefined;
+      if ((urlMissing || picMissing) && hasResolvableId) {
         const enriched = await enrichTracksToDirectLinks(parsed, meting, server, query, baseUrl);
         result = wasString ? JSON.stringify(enriched) : enriched;
       }
